@@ -1,4 +1,4 @@
-"""MCP server: Mail and other macOS automation via AppleScript."""
+"""MCP server: Mail, Calendar, and other macOS automation via AppleScript."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -37,6 +39,14 @@ MAIL_MARK_SCRIPT = Path(__file__).with_name("mail_mark.applescript").read_text()
 MAIL_DELETE_SCRIPT = Path(__file__).with_name("mail_delete.applescript").read_text()
 MAIL_REPLY_SCRIPT = Path(__file__).with_name("mail_reply.applescript").read_text()
 MAIL_GET_ATTACHMENT_SCRIPT = Path(__file__).with_name("mail_get_attachment.applescript").read_text()
+CALENDAR_LIST_CALENDARS_SCRIPT = Path(__file__).with_name("calendar_list_calendars.applescript").read_text()
+CALENDAR_LIST_EVENTS_SCRIPT = Path(__file__).with_name("calendar_list_events.applescript").read_text()
+CALENDAR_GET_EVENT_SCRIPT = Path(__file__).with_name("calendar_get_event.applescript").read_text()
+CALENDAR_SEARCH_EVENTS_SCRIPT = Path(__file__).with_name("calendar_search_events.applescript").read_text()
+CALENDAR_ADD_EVENT_SCRIPT = Path(__file__).with_name("calendar_add_event.applescript").read_text()
+CALENDAR_ADD_RECURRING_EVENT_SCRIPT = Path(__file__).with_name("calendar_add_recurring_event.applescript").read_text()
+CALENDAR_UPDATE_EVENT_SCRIPT = Path(__file__).with_name("calendar_update_event.applescript").read_text()
+CALENDAR_DELETE_EVENT_SCRIPT = Path(__file__).with_name("calendar_delete_event.applescript").read_text()
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
@@ -45,9 +55,34 @@ SEARCH_LIMIT_MAX = 50
 SEARCH_SCAN_MIN = 1
 SEARCH_SCAN_MAX = 2000
 
+CAL_EVENTS_LIMIT_MIN = 1
+CAL_EVENTS_LIMIT_MAX = 200
+CAL_SEARCH_QUERY_MAX_LEN = 500
+CAL_RANGE_MAX_SECONDS = 2 * 366 * 24 * 3600
+CAL_PATCH_MAX_BYTES = 256_000
+CAL_RRULE_MAX_LEN = 4000
+
 ATTACHMENT_MAX_FILES = 15
 ATTACHMENT_MAX_BYTES_PER_FILE = 5 * 1024 * 1024
 ATTACHMENT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
+
+# Short name -> bundle id. Only these apps may be started via macos_launch.
+MACOS_LAUNCH_ALLOWLIST: dict[str, str] = {
+    "mail": "com.apple.mail",
+    "calendar": "com.apple.iCal",
+    "reminders": "com.apple.reminders",
+    "safari": "com.apple.Safari",
+    "preview": "com.apple.Preview",
+    "notes": "com.apple.Notes",
+}
+
+# Extra lookup keys (normalized to lowercase). Use for common alternates (e.g. iCal).
+MACOS_LAUNCH_ALIASES: dict[str, str] = {
+    "ical": "com.apple.iCal",
+}
+
+LAUNCH_DELAY_MIN = 0.0
+LAUNCH_DELAY_MAX = 30.0
 
 
 def _resolve_mailbox(mailbox: str | None) -> str:
@@ -86,6 +121,133 @@ def _run_applescript(script: str, args: list[str], timeout: float = 120.0) -> st
     return proc.stdout.strip()
 
 
+def _b64_utf8(s: str) -> str:
+    return base64.standard_b64encode(s.encode("utf-8")).decode("ascii")
+
+
+def _cal_unix_error(ts: object, label: str) -> str | None:
+    try:
+        x = float(ts)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return f"{label} must be a number"
+    if abs(x) > 1e12:
+        return f"{label} is out of range"
+    return None
+
+
+def _cal_range_error(start_unix: object, end_unix: object) -> str | None:
+    e = _cal_unix_error(start_unix, "start_unix")
+    if e:
+        return e
+    e = _cal_unix_error(end_unix, "end_unix")
+    if e:
+        return e
+    su, eu = float(start_unix), float(end_unix)  # type: ignore[arg-type]
+    if eu <= su:
+        return "end_unix must be greater than start_unix"
+    if eu - su > CAL_RANGE_MAX_SECONDS:
+        return f"time range must be at most {CAL_RANGE_MAX_SECONDS} seconds (~2 years)"
+    return None
+
+
+def _cal_iso_z(ts: float) -> str:
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _cal_parse_event_tsv_row(ln: str) -> dict[str, str | float | bool] | None:
+    parts = ln.split("\t", 6)
+    if len(parts) < 7:
+        return None
+    cal, uid, summary, sux_s, eux_s, ad, loc = parts
+    try:
+        sux = float(sux_s)
+        eux = float(eux_s)
+    except ValueError:
+        return None
+    return {
+        "calendar": cal,
+        "uid": uid,
+        "summary": summary,
+        "location": loc,
+        "all_day": ad == "1",
+        "start_unix": sux,
+        "end_unix": eux,
+        "start_iso": _cal_iso_z(sux),
+        "end_iso": _cal_iso_z(eux),
+    }
+
+
+def _cal_build_patch_blob_b64(updates: dict[str, str | float | bool]) -> str:
+    order = ("summary", "description", "location", "url", "start_unix", "end_unix", "all_day")
+    lines: list[str] = []
+    for k in order:
+        if k not in updates:
+            continue
+        v = updates[k]
+        if k == "all_day":
+            payload = "1" if v else "0"
+        elif k in ("start_unix", "end_unix"):
+            payload = str(float(v))  # type: ignore[arg-type]
+        else:
+            payload = str(v)
+        lines.append(f"{k}={_b64_utf8(payload)}")
+    text = "\n".join(lines) + ("\n" if lines else "")
+    if len(text.encode("utf-8")) > CAL_PATCH_MAX_BYTES:
+        raise ValueError(f"patch exceeds {CAL_PATCH_MAX_BYTES} bytes")
+    return _b64_utf8(text)
+
+
+ICAL_PREFS_DOMAIN = "com.apple.iCal"
+ICAL_DEFAULT_CAL_ID_KEY = "defaultCalendarID"
+ICAL_LAST_SELECTED_CAL_KEY = "last selected calendar list item"
+
+
+def _ical_defaults_read(key: str) -> str | None:
+    proc = subprocess.run(
+        ["defaults", "read", ICAL_PREFS_DOMAIN, key],
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    s = (proc.stdout or "").strip()
+    return s if s else None
+
+
+def _ical_defaults_write_string(key: str, value: str) -> None:
+    proc = subprocess.run(
+        ["defaults", "write", ICAL_PREFS_DOMAIN, key, "-string", value],
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip() or proc.stdout.strip()
+        raise RuntimeError(err or "defaults write failed")
+
+
+def _cal_parse_calendar_list_tsv(raw: str) -> list[dict[str, str | bool]]:
+    rows: list[dict[str, str | bool]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        parts = ln.split("\t", 3)
+        name = parts[0] if len(parts) > 0 else ""
+        cid = parts[1] if len(parts) > 1 else ""
+        w = parts[2] if len(parts) > 2 else "0"
+        col = parts[3] if len(parts) > 3 else ""
+        rows.append({"name": name, "id": cid, "writable": w == "1", "color": col})
+    return rows
+
+
+def _cal_fetch_calendar_rows() -> list[dict[str, str | bool]]:
+    raw = _run_applescript(CALENDAR_LIST_CALENDARS_SCRIPT, [], timeout=60.0)
+    return _cal_parse_calendar_list_tsv(raw)
+
+
 def _normalize_mail_ids(mail_ids: str) -> str:
     parts = re.split(r"[,;\s]+", mail_ids.strip())
     return ",".join(p for p in parts if p)
@@ -111,6 +273,58 @@ def _parse_header_tsv(raw: str) -> list[dict[str, str]]:
             }
         )
     return out
+
+
+def _bundle_id_for_launch_app(app: str) -> str | None:
+    """Resolve allowlisted bundle id from short name, alias, Mail.app-style name, or bundle id."""
+    raw = app.strip()
+    if not raw:
+        return None
+    # Exact bundle id (case-insensitive) if it is one of our allowlisted apps.
+    for bid in MACOS_LAUNCH_ALLOWLIST.values():
+        if raw.lower() == bid.lower():
+            return bid
+    key = _normalize_launch_app_key(raw)
+    if key in MACOS_LAUNCH_ALLOWLIST:
+        return MACOS_LAUNCH_ALLOWLIST[key]
+    if key in MACOS_LAUNCH_ALIASES:
+        return MACOS_LAUNCH_ALIASES[key]
+    return None
+
+
+def _normalize_launch_app_key(app: str) -> str:
+    """Lowercase single token: strip, collapse spaces, strip one trailing .app."""
+    s = " ".join(app.split())
+    if len(s) > 4 and s.lower().endswith(".app"):
+        s = s[:-4].rstrip()
+    return s.lower()
+
+
+def _launch_allowed_names_for_error() -> str:
+    names = sorted(set(MACOS_LAUNCH_ALLOWLIST) | set(MACOS_LAUNCH_ALIASES.keys()))
+    return ", ".join(names)
+
+
+def _osascript_escape_for_bundle_id(bundle_id: str) -> str:
+    return bundle_id.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _run_macos_launch(bundle_id: str) -> None:
+    bid = _osascript_escape_for_bundle_id(bundle_id)
+    script = (
+        f'tell application id "{bid}" to launch\n'
+        f'tell application id "{bid}" to activate\n'
+    )
+    proc = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=60.0,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip() or proc.stdout.strip()
+        raise RuntimeError(err or f"osascript exited with {proc.returncode}")
 
 
 def _run_mail_send(
@@ -728,6 +942,572 @@ def mail_get_attachment(
         return json.dumps({"attachments": out}, indent=2)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@mcp.tool()
+def macos_launch(
+    app: str,
+    delay_seconds: float = 0.5,
+) -> str:
+    """Launch an allowlisted macOS application and bring it to the foreground.
+
+    Always runs ``launch`` then ``activate`` so the app is ready for AppleScript
+    (e.g. Calendar) even when a background process already existed.
+
+    App names are matched case-insensitively. You may pass a short name (mail,
+    calendar, …), the same with ``.app`` (Mail.app, Calendar.app), common aliases
+    (e.g. ical for Calendar), or the exact Apple bundle identifier if it is one of
+    the allowlisted apps.
+
+    delay_seconds: Wait this many seconds after launch/activate (0–30). Useful
+    before other tools talk to the app.
+    """
+    bid = _bundle_id_for_launch_app(app)
+    if bid is None:
+        return json.dumps(
+            {
+                "error": f"Unknown app {app!r}. Allowed names and aliases: {_launch_allowed_names_for_error()}",
+            },
+            indent=2,
+        )
+    try:
+        d = float(delay_seconds)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "delay_seconds must be a number"}, indent=2)
+    d = max(LAUNCH_DELAY_MIN, min(d, LAUNCH_DELAY_MAX))
+    try:
+        _run_macos_launch(bid)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "macos_launch timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if d > 0:
+        time.sleep(d)
+    return json.dumps(
+        {
+            "ok": True,
+            "app": app.strip(),
+            "bundle_id": bid,
+            "activate": True,
+            "delay_seconds": d,
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def calendar_list_calendars() -> str:
+    """List calendars in Calendar.app (name, id, writable, color).
+
+    Tool prefix calendar_* is reserved for Calendar.app automation.
+
+    Returns JSON array of objects with keys: name, id, writable (boolean),
+    color (string representation, may be empty).
+    """
+    try:
+        raw = _run_applescript(CALENDAR_LIST_CALENDARS_SCRIPT, [], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows = _cal_parse_calendar_list_tsv(raw)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def calendar_list_events(
+    start_unix: float,
+    end_unix: float,
+    calendar: str | None = None,
+    limit: int = 50,
+) -> str:
+    """List Calendar events whose time range overlaps [start_unix, end_unix).
+
+    Times are POSIX seconds (UTC instant). Overlap uses Calendar's start/end dates
+    (half-open window on the server side in AppleScript: start < end_unix and
+    end > start_unix).
+
+    calendar: Optional calendar **name** (exact match). If omitted or empty, all
+    calendars are scanned in arbitrary order until ``limit`` events are collected.
+
+    limit: Max events to return (1–200). Unsorted when scanning multiple calendars.
+
+    Recurring series may appear as a single master event depending on Calendar's
+    scripting model. Use ``macos_launch`` with app ``calendar`` first if AppleScript
+    returns not-running errors.
+    """
+    err = _cal_range_error(start_unix, end_unix)
+    if err:
+        return json.dumps({"error": err}, indent=2)
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be an integer"}, indent=2)
+    n = max(CAL_EVENTS_LIMIT_MIN, min(lim, CAL_EVENTS_LIMIT_MAX))
+    cal = (calendar or "").strip()
+    try:
+        raw = _run_applescript(
+            CALENDAR_LIST_EVENTS_SCRIPT,
+            [cal, str(float(start_unix)), str(float(end_unix)), str(n)],
+            timeout=180.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str | float | bool]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        row = _cal_parse_event_tsv_row(ln)
+        if row:
+            rows.append(row)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def calendar_get_event(
+    uid: str,
+    calendar: str | None = None,
+) -> str:
+    """Fetch one Calendar event by **uid** (string from calendar_list_events / calendar_add_event).
+
+    calendar: Optional calendar name hint (exact match). If omitted, every calendar
+    is searched until a matching uid is found.
+
+    Returns JSON with calendar, uid, summary, description, location, url,
+    start_unix, end_unix, all_day, start_iso, end_iso (UTC Zulu instants).
+
+    For recurring events, uid typically identifies the series; edits/deletes may
+    apply to the whole series in Calendar.app.
+    """
+    u = uid.strip()
+    if not u:
+        return json.dumps({"error": "uid must be non-empty"}, indent=2)
+    hint = (calendar or "").strip()
+    try:
+        raw = _run_applescript(CALENDAR_GET_EVENT_SCRIPT, [hint, u], timeout=120.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    sep = chr(30)
+    parts = raw.split(sep, 8)
+    if len(parts) < 9:
+        return json.dumps({"error": "Unexpected Calendar output; try macos_launch calendar first."}, indent=2)
+    cnm, euid, summ, desc, loc, surl, sux_s, eux_s, ad = parts
+    try:
+        sux = float(sux_s)
+        eux = float(eux_s)
+    except ValueError:
+        return json.dumps({"error": "Invalid start/end in Calendar output"}, indent=2)
+    payload = {
+        "calendar": cnm,
+        "uid": euid,
+        "summary": summ,
+        "description": desc,
+        "location": loc,
+        "url": surl,
+        "start_unix": sux,
+        "end_unix": eux,
+        "all_day": ad == "1",
+        "start_iso": _cal_iso_z(sux),
+        "end_iso": _cal_iso_z(eux),
+    }
+    return json.dumps(payload, indent=2)
+
+
+@mcp.tool()
+def calendar_search_events(
+    query: str,
+    start_unix: float,
+    end_unix: float,
+    calendar: str | None = None,
+    limit: int = 30,
+) -> str:
+    """Case-insensitive substring search in summary, description, and location for events overlapping the range.
+
+    query: Non-empty substring (max 500 characters).
+
+    start_unix / end_unix: Same overlap semantics as calendar_list_events.
+
+    calendar: Optional calendar name (exact). Empty scans all calendars.
+
+    limit: 1–200 matches (cap). Uses Foundation for lowercasing on the AppleScript side.
+    """
+    q = query.strip()
+    if not q:
+        return json.dumps({"error": "query must be non-empty"}, indent=2)
+    if len(q) > CAL_SEARCH_QUERY_MAX_LEN:
+        return json.dumps(
+            {"error": f"query must be at most {CAL_SEARCH_QUERY_MAX_LEN} characters"},
+            indent=2,
+        )
+    err = _cal_range_error(start_unix, end_unix)
+    if err:
+        return json.dumps({"error": err}, indent=2)
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be an integer"}, indent=2)
+    n = max(CAL_EVENTS_LIMIT_MIN, min(lim, CAL_EVENTS_LIMIT_MAX))
+    cal = (calendar or "").strip()
+    try:
+        raw = _run_applescript(
+            CALENDAR_SEARCH_EVENTS_SCRIPT,
+            [q, cal, str(float(start_unix)), str(float(end_unix)), str(n)],
+            timeout=180.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str | float | bool]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        row = _cal_parse_event_tsv_row(ln)
+        if row:
+            rows.append(row)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def calendar_add_event(
+    calendar: str,
+    summary: str,
+    start_unix: float,
+    end_unix: float,
+    all_day: bool = False,
+    description: str | None = None,
+    location: str | None = None,
+    url: str | None = None,
+) -> str:
+    """Create a single Calendar event on a named calendar; returns its **uid**.
+
+    calendar: Target calendar name (exact match; use calendar_list_calendars).
+
+    summary: Event title (UTF-8). Must not contain ASCII NUL.
+
+    start_unix / end_unix: POSIX seconds. For all-day events, use midnight-aligned
+    instants for the intended local calendar day (Calendar interprets using the
+    system timezone).
+
+    all_day: When true, creates an all-day style event.
+
+    description / location / url: Optional UTF-8 strings. Omitted parameters leave
+    the property unset. Pass an empty string to set an empty value (still transmitted
+    via base64 internally).
+
+    Writable calendars only; read-only calendars raise an AppleScript error.
+    """
+    cal = calendar.strip()
+    if not cal:
+        return json.dumps({"error": "calendar must be non-empty"}, indent=2)
+    summ = summary if summary is not None else ""
+    if "\x00" in summ:
+        return json.dumps({"error": "summary must not contain NUL"}, indent=2)
+    err = _cal_range_error(start_unix, end_unix)
+    if err:
+        return json.dumps({"error": err}, indent=2)
+    desc_b64 = ""
+    if description is not None:
+        if "\x00" in description:
+            return json.dumps({"error": "description must not contain NUL"}, indent=2)
+        desc_b64 = _b64_utf8(description)
+    loc_b64 = ""
+    if location is not None:
+        if "\x00" in location:
+            return json.dumps({"error": "location must not contain NUL"}, indent=2)
+        loc_b64 = _b64_utf8(location)
+    url_b64 = ""
+    if url is not None:
+        if "\x00" in url:
+            return json.dumps({"error": "url must not contain NUL"}, indent=2)
+        url_b64 = _b64_utf8(url)
+    ad = "1" if all_day else "0"
+    summ_b64 = _b64_utf8(summ)
+    try:
+        raw = _run_applescript(
+            CALENDAR_ADD_EVENT_SCRIPT,
+            [
+                cal,
+                summ_b64,
+                desc_b64,
+                loc_b64,
+                url_b64,
+                str(float(start_unix)),
+                str(float(end_unix)),
+                ad,
+            ],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    new_uid = raw.strip()
+    if not new_uid:
+        return json.dumps({"error": "Calendar returned empty uid"}, indent=2)
+    return json.dumps({"uid": new_uid}, indent=2)
+
+
+@mcp.tool()
+def calendar_add_recurring_event(
+    calendar: str,
+    summary: str,
+    start_unix: float,
+    end_unix: float,
+    recurrence: str,
+    all_day: bool = False,
+    description: str | None = None,
+    location: str | None = None,
+    url: str | None = None,
+) -> str:
+    """Create a **recurring** Calendar event (debug path separate from ``calendar_add_event``).
+
+    Same arguments as ``calendar_add_event``, plus **recurrence**: an iCalendar **RRULE**
+    body (without the ``RRULE:`` prefix), for example ``FREQ=WEEKLY;BYDAY=MO`` or
+    ``FREQ=DAILY;INTERVAL=1``. You can include ``UNTIL=...`` in the rule if Calendar
+    accepts it for your pattern.
+
+    The AppleScript creates the event, then sets ``recurrence`` on the new event.
+    Writable calendars only. Returns the new series **uid** (same shape as
+    ``calendar_add_event``).
+    """
+    cal = calendar.strip()
+    if not cal:
+        return json.dumps({"error": "calendar must be non-empty"}, indent=2)
+    summ = summary if summary is not None else ""
+    if "\x00" in summ:
+        return json.dumps({"error": "summary must not contain NUL"}, indent=2)
+    rrule = recurrence.strip()
+    if not rrule:
+        return json.dumps({"error": "recurrence must be a non-empty RRULE string"}, indent=2)
+    if len(rrule) > CAL_RRULE_MAX_LEN:
+        return json.dumps(
+            {"error": f"recurrence must be at most {CAL_RRULE_MAX_LEN} characters"},
+            indent=2,
+        )
+    if "\x00" in rrule:
+        return json.dumps({"error": "recurrence must not contain NUL"}, indent=2)
+    err = _cal_range_error(start_unix, end_unix)
+    if err:
+        return json.dumps({"error": err}, indent=2)
+    desc_b64 = ""
+    if description is not None:
+        if "\x00" in description:
+            return json.dumps({"error": "description must not contain NUL"}, indent=2)
+        desc_b64 = _b64_utf8(description)
+    loc_b64 = ""
+    if location is not None:
+        if "\x00" in location:
+            return json.dumps({"error": "location must not contain NUL"}, indent=2)
+        loc_b64 = _b64_utf8(location)
+    url_b64 = ""
+    if url is not None:
+        if "\x00" in url:
+            return json.dumps({"error": "url must not contain NUL"}, indent=2)
+        url_b64 = _b64_utf8(url)
+    ad = "1" if all_day else "0"
+    summ_b64 = _b64_utf8(summ)
+    rrule_b64 = _b64_utf8(rrule)
+    try:
+        raw = _run_applescript(
+            CALENDAR_ADD_RECURRING_EVENT_SCRIPT,
+            [
+                cal,
+                summ_b64,
+                desc_b64,
+                loc_b64,
+                url_b64,
+                str(float(start_unix)),
+                str(float(end_unix)),
+                ad,
+                rrule_b64,
+            ],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    new_uid = raw.strip()
+    if not new_uid:
+        return json.dumps({"error": "Calendar returned empty uid"}, indent=2)
+    return json.dumps({"uid": new_uid, "recurrence": rrule}, indent=2)
+
+
+@mcp.tool()
+def calendar_update_event(
+    uid: str,
+    calendar: str | None = None,
+    summary: str | None = None,
+    description: str | None = None,
+    location: str | None = None,
+    url: str | None = None,
+    start_unix: float | None = None,
+    end_unix: float | None = None,
+    all_day: bool | None = None,
+) -> str:
+    """Patch fields on an existing event identified by **uid**.
+
+    Only parameters you pass are applied (``None`` / omitted means leave unchanged).
+
+    start_unix and end_unix must be supplied together when changing times.
+
+    Values are transported in a small base64 patch block; avoid megabyte-sized
+    descriptions. NUL bytes are rejected.
+
+    Recurring events: Calendar.app may update the series master; behavior is not
+    split into detached instances here.
+    """
+    u = uid.strip()
+    if not u:
+        return json.dumps({"error": "uid must be non-empty"}, indent=2)
+    updates: dict[str, str | float | bool] = {}
+    if summary is not None:
+        if "\x00" in summary:
+            return json.dumps({"error": "summary must not contain NUL"}, indent=2)
+        updates["summary"] = summary
+    if description is not None:
+        if "\x00" in description:
+            return json.dumps({"error": "description must not contain NUL"}, indent=2)
+        updates["description"] = description
+    if location is not None:
+        if "\x00" in location:
+            return json.dumps({"error": "location must not contain NUL"}, indent=2)
+        updates["location"] = location
+    if url is not None:
+        if "\x00" in url:
+            return json.dumps({"error": "url must not contain NUL"}, indent=2)
+        updates["url"] = url
+    if start_unix is not None or end_unix is not None:
+        if start_unix is None or end_unix is None:
+            return json.dumps(
+                {"error": "start_unix and end_unix must both be set to change times"},
+                indent=2,
+            )
+        err = _cal_range_error(start_unix, end_unix)
+        if err:
+            return json.dumps({"error": err}, indent=2)
+        updates["start_unix"] = float(start_unix)
+        updates["end_unix"] = float(end_unix)
+    if all_day is not None:
+        updates["all_day"] = bool(all_day)
+    if not updates:
+        return json.dumps({"error": "provide at least one field to update"}, indent=2)
+    try:
+        patch_b64 = _cal_build_patch_blob_b64(updates)
+    except ValueError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    hint = (calendar or "").strip()
+    try:
+        raw = _run_applescript(
+            CALENDAR_UPDATE_EVENT_SCRIPT,
+            [hint, u, patch_b64],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    out_uid = raw.strip()
+    return json.dumps({"ok": True, "uid": out_uid}, indent=2)
+
+
+@mcp.tool()
+def calendar_delete_event(
+    uid: str,
+    calendar: str | None = None,
+) -> str:
+    """Delete an event by **uid** (optional calendar name hint for faster lookup).
+
+    Recurring events may delete the entire series depending on Calendar's rules.
+    """
+    u = uid.strip()
+    if not u:
+        return json.dumps({"error": "uid must be non-empty"}, indent=2)
+    hint = (calendar or "").strip()
+    try:
+        raw = _run_applescript(CALENDAR_DELETE_EVENT_SCRIPT, [hint, u], timeout=120.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if raw.strip().upper() == "OK":
+        return json.dumps({"ok": True}, indent=2)
+    return json.dumps({"ok": True, "detail": raw}, indent=2)
+
+
+@mcp.tool()
+def calendar_default_calendar(set_to: str | None = None) -> str:
+    """Get or set the default calendar used for new events (Calendar.app / iCal prefs).
+
+    **Get** (``set_to`` omitted or empty): reads ``com.apple.iCal`` preference
+    ``defaultCalendarID`` (falling back to ``last selected calendar list item``)
+    and resolves the calendar **name** via ``calendar_list_calendars``. Also returns
+    ``preferences_default_mode`` (e.g. ``UseLastSelectedAsDefaultCalendar``) when present.
+
+    **Set** (``set_to`` non-empty): resolves the calendar by **exact name** or by
+    **id** string from ``calendar_list_calendars``, then writes the same preference
+    keys via ``defaults``. Calendar.app may need a moment to pick up changes; relaunch
+    with ``macos_launch`` if the UI looks stale.
+
+    AppleScript does not expose ``default calendar`` reliably across macOS versions,
+    so this tool uses the on-disk preference keys Calendar maintains.
+    """
+    st = set_to.strip() if set_to else ""
+    try:
+        rows = _cal_fetch_calendar_rows()
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if not st:
+        cid = _ical_defaults_read(ICAL_DEFAULT_CAL_ID_KEY) or _ical_defaults_read(ICAL_LAST_SELECTED_CAL_KEY) or ""
+        name = ""
+        for r in rows:
+            if str(r.get("id", "")) == cid:
+                name = str(r.get("name", ""))
+                break
+        mode = _ical_defaults_read("CalDefaultCalendar") or ""
+        return json.dumps(
+            {
+                "id": cid,
+                "name": name,
+                "preferences_default_mode": mode,
+            },
+            indent=2,
+        )
+    target = st
+    match: dict[str, str | bool] | None = None
+    for r in rows:
+        if str(r.get("name", "")) == target:
+            match = r
+            break
+    if match is None:
+        for r in rows:
+            if str(r.get("id", "")) == target:
+                match = r
+                break
+    if match is None:
+        return json.dumps({"error": f"No calendar named or id-matching {target!r}"}, indent=2)
+    new_id = str(match.get("id", ""))
+    if not new_id:
+        return json.dumps({"error": "Matched calendar has empty id"}, indent=2)
+    try:
+        _ical_defaults_write_string(ICAL_DEFAULT_CAL_ID_KEY, new_id)
+        _ical_defaults_write_string(ICAL_LAST_SELECTED_CAL_KEY, new_id)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    return json.dumps(
+        {
+            "ok": True,
+            "default": {"name": str(match.get("name", "")), "id": new_id},
+        },
+        indent=2,
+    )
 
 
 def main() -> None:
