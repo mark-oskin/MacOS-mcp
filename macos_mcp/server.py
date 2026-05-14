@@ -1,4 +1,4 @@
-"""MCP server: Mail, Calendar, and other macOS automation via AppleScript."""
+"""MCP server: Mail, Calendar, Reminders, Notes, Music (itunes_), and other macOS automation."""
 
 from __future__ import annotations
 
@@ -48,6 +48,30 @@ CALENDAR_ADD_RECURRING_EVENT_SCRIPT = Path(__file__).with_name("calendar_add_rec
 CALENDAR_UPDATE_EVENT_SCRIPT = Path(__file__).with_name("calendar_update_event.applescript").read_text()
 CALENDAR_DELETE_EVENT_SCRIPT = Path(__file__).with_name("calendar_delete_event.applescript").read_text()
 
+REMINDERS_LIST_LISTS_SCRIPT = Path(__file__).with_name("reminders_list_lists.applescript").read_text()
+REMINDERS_LIST_REMINDERS_SCRIPT = Path(__file__).with_name("reminders_list_reminders.applescript").read_text()
+REMINDERS_GET_REMINDER_SCRIPT = Path(__file__).with_name("reminders_get_reminder.applescript").read_text()
+REMINDERS_ADD_REMINDER_SCRIPT = Path(__file__).with_name("reminders_add_reminder.applescript").read_text()
+REMINDERS_SET_COMPLETED_SCRIPT = Path(__file__).with_name("reminders_set_completed.applescript").read_text()
+REMINDERS_DELETE_REMINDER_SCRIPT = Path(__file__).with_name("reminders_delete_reminder.applescript").read_text()
+REMINDERS_SEARCH_REMINDERS_SCRIPT = Path(__file__).with_name("reminders_search_reminders.applescript").read_text()
+
+NOTES_LIST_ACCOUNTS_SCRIPT = Path(__file__).with_name("notes_list_accounts.applescript").read_text()
+NOTES_LIST_FOLDERS_SCRIPT = Path(__file__).with_name("notes_list_folders.applescript").read_text()
+NOTES_LIST_NOTES_SCRIPT = Path(__file__).with_name("notes_list_notes.applescript").read_text()
+NOTES_GET_NOTE_SCRIPT = Path(__file__).with_name("notes_get_note.applescript").read_text()
+NOTES_SEARCH_NOTES_SCRIPT = Path(__file__).with_name("notes_search_notes.applescript").read_text()
+NOTES_ADD_NOTE_SCRIPT = Path(__file__).with_name("notes_add_note.applescript").read_text()
+NOTES_UPDATE_NOTE_SCRIPT = Path(__file__).with_name("notes_update_note.applescript").read_text()
+NOTES_DELETE_NOTE_SCRIPT = Path(__file__).with_name("notes_delete_note.applescript").read_text()
+
+ITUNES_LIST_PLAYLISTS_SCRIPT = Path(__file__).with_name("itunes_list_playlists.applescript").read_text()
+ITUNES_SEARCH_LIBRARY_SCRIPT = Path(__file__).with_name("itunes_search_library.applescript").read_text()
+ITUNES_GET_TRACK_SCRIPT = Path(__file__).with_name("itunes_get_track.applescript").read_text()
+ITUNES_NOW_PLAYING_SCRIPT = Path(__file__).with_name("itunes_now_playing.applescript").read_text()
+ITUNES_PLAY_TRACK_SCRIPT = Path(__file__).with_name("itunes_play_track.applescript").read_text()
+ITUNES_PLAY_PAUSE_SCRIPT = Path(__file__).with_name("itunes_play_pause.applescript").read_text()
+
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
 SEARCH_LIMIT_MIN = 1
@@ -62,6 +86,20 @@ CAL_RANGE_MAX_SECONDS = 2 * 366 * 24 * 3600
 CAL_PATCH_MAX_BYTES = 256_000
 CAL_RRULE_MAX_LEN = 4000
 
+REMINDER_LIMIT_MIN = 1
+REMINDER_LIMIT_MAX = 200
+REMINDER_QUERY_MAX_LEN = 500
+
+NOTES_LIMIT_MIN = 1
+NOTES_LIMIT_MAX = 200
+NOTES_QUERY_MAX_LEN = 500
+NOTES_SKIP_FIELD = "__SKIP__"
+
+ITUNES_MATCH_LIMIT_MIN = 1
+ITUNES_MATCH_LIMIT_MAX = 100
+ITUNES_SCAN_MAX_MIN = 100
+ITUNES_SCAN_MAX_MAX = 100_000
+
 ATTACHMENT_MAX_FILES = 15
 ATTACHMENT_MAX_BYTES_PER_FILE = 5 * 1024 * 1024
 ATTACHMENT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
@@ -74,11 +112,13 @@ MACOS_LAUNCH_ALLOWLIST: dict[str, str] = {
     "safari": "com.apple.Safari",
     "preview": "com.apple.Preview",
     "notes": "com.apple.Notes",
+    "music": "com.apple.Music",
 }
 
 # Extra lookup keys (normalized to lowercase). Use for common alternates (e.g. iCal).
 MACOS_LAUNCH_ALIASES: dict[str, str] = {
     "ical": "com.apple.iCal",
+    "itunes": "com.apple.Music",
 }
 
 LAUNCH_DELAY_MIN = 0.0
@@ -246,6 +286,94 @@ def _cal_parse_calendar_list_tsv(raw: str) -> list[dict[str, str | bool]]:
 def _cal_fetch_calendar_rows() -> list[dict[str, str | bool]]:
     raw = _run_applescript(CALENDAR_LIST_CALENDARS_SCRIPT, [], timeout=60.0)
     return _cal_parse_calendar_list_tsv(raw)
+
+
+def _rem_parse_reminder_row(ln: str) -> dict[str, str | float | bool | None] | None:
+    parts = ln.split("\t", 5)
+    if len(parts) < 6:
+        return None
+    rid, title, body, du_s, done, lst = parts
+    due: float | None = None
+    if du_s.strip():
+        try:
+            due = float(du_s)
+        except ValueError:
+            due = None
+    return {
+        "id": rid,
+        "title": title,
+        "body": body,
+        "due_unix": due,
+        "due_iso": _cal_iso_z(due) if due is not None else None,
+        "completed": done == "1",
+        "list": lst,
+    }
+
+
+def _notes_parse_folder_row(ln: str) -> dict[str, str] | None:
+    parts = ln.split("\t", 2)
+    if len(parts) < 3:
+        return None
+    return {"account": parts[0], "folder_path": parts[1], "id": parts[2]}
+
+
+def _notes_parse_note_list_row(ln: str) -> dict[str, str | float] | None:
+    parts = ln.split("\t", 4)
+    if len(parts) < 5:
+        return None
+    nid, name, cux, mux, prv = parts
+    try:
+        cu = float(cux)
+        mu = float(mux)
+    except ValueError:
+        return None
+    return {
+        "id": nid,
+        "name": name,
+        "created_unix": cu,
+        "modified_unix": mu,
+        "preview": prv,
+        "created_iso": _cal_iso_z(cu),
+        "modified_iso": _cal_iso_z(mu),
+    }
+
+
+def _notes_parse_search_row(ln: str) -> dict[str, str | float] | None:
+    parts = ln.split("\t", 3)
+    if len(parts) < 4:
+        return None
+    nid, name, mux, prv = parts
+    try:
+        mu = float(mux)
+    except ValueError:
+        return None
+    return {
+        "id": nid,
+        "name": name,
+        "modified_unix": mu,
+        "preview": prv,
+        "modified_iso": _cal_iso_z(mu),
+    }
+
+
+def _itunes_parse_track_row(ln: str) -> dict[str, str | float | int] | None:
+    parts = ln.split("\t", 5)
+    if len(parts) < 6:
+        return None
+    pid, name, artist, album, dur_s, tn_s = parts
+    try:
+        dur = float(dur_s)
+        tn = int(tn_s)
+    except ValueError:
+        dur, tn = 0.0, 0
+    return {
+        "persistent_id": pid,
+        "name": name,
+        "artist": artist,
+        "album": album,
+        "duration_sec": dur,
+        "track_number": tn,
+    }
 
 
 def _normalize_mail_ids(mail_ids: str) -> str:
@@ -955,9 +1083,9 @@ def macos_launch(
     (e.g. Calendar) even when a background process already existed.
 
     App names are matched case-insensitively. You may pass a short name (mail,
-    calendar, …), the same with ``.app`` (Mail.app, Calendar.app), common aliases
-    (e.g. ical for Calendar), or the exact Apple bundle identifier if it is one of
-    the allowlisted apps.
+    calendar, reminders, notes, music, …), the same with ``.app``, common aliases
+    (e.g. ical for Calendar, itunes for Music), or the exact Apple bundle identifier
+    if it is one of the allowlisted apps.
 
     delay_seconds: Wait this many seconds after launch/activate (0–30). Useful
     before other tools talk to the app.
@@ -1508,6 +1636,661 @@ def calendar_default_calendar(set_to: str | None = None) -> str:
         },
         indent=2,
     )
+
+
+@mcp.tool()
+def reminders_list_lists() -> str:
+    """List Reminders.app lists (sidebar) with **name** and **id** strings."""
+    try:
+        raw = _run_applescript(REMINDERS_LIST_LISTS_SCRIPT, [], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        parts = ln.split("\t", 1)
+        rows.append({"name": parts[0], "id": parts[1] if len(parts) > 1 else ""})
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def reminders_list_reminders(
+    list_name: str,
+    include_completed: bool = False,
+    limit: int = 50,
+) -> str:
+    """List reminders in one list (title, body, due_unix, completed, id).
+
+    list_name: Exact Reminders list name (from reminders_list_lists).
+
+    include_completed: When false, only incomplete reminders are returned.
+
+    limit: 1–200 reminders (arbitrary order as returned by the app).
+    """
+    ln = list_name.strip()
+    if not ln:
+        return json.dumps({"error": "list_name must be non-empty"}, indent=2)
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be an integer"}, indent=2)
+    n = max(REMINDER_LIMIT_MIN, min(lim, REMINDER_LIMIT_MAX))
+    inc = "1" if include_completed else "0"
+    try:
+        raw = _run_applescript(
+            REMINDERS_LIST_REMINDERS_SCRIPT,
+            [ln, inc, str(n)],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str | float | bool | None]] = []
+    for row_ln in raw.splitlines():
+        if not row_ln.strip():
+            continue
+        r = _rem_parse_reminder_row(row_ln)
+        if r:
+            rows.append(r)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def reminders_get_reminder(
+    reminder_id: str,
+    list_name: str | None = None,
+) -> str:
+    """Fetch one reminder by **reminder_id** (x-apple-reminder://… from list/search).
+
+    list_name: Optional list hint for faster lookup; if omitted, all lists are scanned.
+    """
+    rid = reminder_id.strip()
+    if not rid:
+        return json.dumps({"error": "reminder_id must be non-empty"}, indent=2)
+    hint = (list_name or "").strip()
+    try:
+        raw = _run_applescript(REMINDERS_GET_REMINDER_SCRIPT, [hint, rid], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    sep = chr(30)
+    parts = raw.split(sep, 6)
+    if len(parts) < 7:
+        return json.dumps({"error": "Unexpected Reminders output"}, indent=2)
+    lst, uid, title, body, du_s, done = (
+        parts[0],
+        parts[1],
+        parts[2],
+        parts[3],
+        parts[4],
+        parts[5],
+        parts[6],
+    )
+    due: float | None = None
+    if du_s.strip():
+        try:
+            due = float(du_s)
+        except ValueError:
+            due = None
+    payload = {
+        "list": lst,
+        "id": uid,
+        "title": title,
+        "body": body,
+        "due_unix": due,
+        "due_iso": _cal_iso_z(due) if due is not None else None,
+        "completed": done == "1",
+    }
+    return json.dumps(payload, indent=2)
+
+
+@mcp.tool()
+def reminders_add_reminder(
+    list_name: str,
+    title: str,
+    body: str | None = None,
+    due_unix: float | None = None,
+) -> str:
+    """Create a reminder in a list; returns its **id** string."""
+    ln = list_name.strip()
+    if not ln:
+        return json.dumps({"error": "list_name must be non-empty"}, indent=2)
+    tit = title if title is not None else ""
+    if "\x00" in tit:
+        return json.dumps({"error": "title must not contain NUL"}, indent=2)
+    bod = body if body is not None else ""
+    if "\x00" in bod:
+        return json.dumps({"error": "body must not contain NUL"}, indent=2)
+    due_s = ""
+    if due_unix is not None:
+        err = _cal_unix_error(due_unix, "due_unix")
+        if err:
+            return json.dumps({"error": err}, indent=2)
+        due_s = str(float(due_unix))
+    try:
+        raw = _run_applescript(
+            REMINDERS_ADD_REMINDER_SCRIPT,
+            [ln, _b64_utf8(tit), _b64_utf8(bod), due_s],
+            timeout=60.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    new_id = raw.strip()
+    if not new_id:
+        return json.dumps({"error": "Reminders returned empty id"}, indent=2)
+    return json.dumps({"id": new_id}, indent=2)
+
+
+@mcp.tool()
+def reminders_set_completed(
+    reminder_id: str,
+    completed: bool,
+    list_name: str | None = None,
+) -> str:
+    """Mark a reminder completed (true) or incomplete (false)."""
+    rid = reminder_id.strip()
+    if not rid:
+        return json.dumps({"error": "reminder_id must be non-empty"}, indent=2)
+    hint = (list_name or "").strip()
+    fl = "1" if completed else "0"
+    try:
+        raw = _run_applescript(
+            REMINDERS_SET_COMPLETED_SCRIPT,
+            [hint, rid, fl],
+            timeout=60.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if raw.strip().upper() == "OK":
+        return json.dumps({"ok": True}, indent=2)
+    return json.dumps({"ok": True, "detail": raw}, indent=2)
+
+
+@mcp.tool()
+def reminders_delete_reminder(
+    reminder_id: str,
+    list_name: str | None = None,
+) -> str:
+    """Delete a reminder by id (optional list hint)."""
+    rid = reminder_id.strip()
+    if not rid:
+        return json.dumps({"error": "reminder_id must be non-empty"}, indent=2)
+    hint = (list_name or "").strip()
+    try:
+        raw = _run_applescript(REMINDERS_DELETE_REMINDER_SCRIPT, [hint, rid], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if raw.strip().upper() == "OK":
+        return json.dumps({"ok": True}, indent=2)
+    return json.dumps({"ok": True, "detail": raw}, indent=2)
+
+
+@mcp.tool()
+def reminders_search_reminders(
+    query: str,
+    list_name: str | None = None,
+    include_completed: bool = False,
+    limit: int = 30,
+) -> str:
+    """Case-insensitive substring search in reminder title and body."""
+    q = query.strip()
+    if not q:
+        return json.dumps({"error": "query must be non-empty"}, indent=2)
+    if len(q) > REMINDER_QUERY_MAX_LEN:
+        return json.dumps(
+            {"error": f"query must be at most {REMINDER_QUERY_MAX_LEN} characters"},
+            indent=2,
+        )
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be an integer"}, indent=2)
+    n = max(REMINDER_LIMIT_MIN, min(lim, REMINDER_LIMIT_MAX))
+    inc = "1" if include_completed else "0"
+    lst = (list_name or "").strip()
+    try:
+        raw = _run_applescript(
+            REMINDERS_SEARCH_REMINDERS_SCRIPT,
+            [q, lst, inc, str(n)],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str | float | bool | None]] = []
+    for row_ln in raw.splitlines():
+        if not row_ln.strip():
+            continue
+        r = _rem_parse_reminder_row(row_ln)
+        if r:
+            rows.append(r)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def notes_list_accounts() -> str:
+    """List Notes.app account names (iCloud, On My Mac, …)."""
+    try:
+        raw = _run_applescript(NOTES_LIST_ACCOUNTS_SCRIPT, [], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    names = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return json.dumps(names, indent=2)
+
+
+@mcp.tool()
+def notes_list_folders(account: str | None = None) -> str:
+    """List folders under an account (recursive paths like ``Notes`` or ``A/B``).
+
+    account: Optional account name; if omitted, uses the **default** Notes account.
+    Returns JSON rows: account, folder_path, id.
+    """
+    acc = (account or "").strip()
+    try:
+        raw = _run_applescript(NOTES_LIST_FOLDERS_SCRIPT, [acc], timeout=120.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        r = _notes_parse_folder_row(ln)
+        if r:
+            rows.append(r)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def notes_list_notes(
+    folder_path: str,
+    account: str | None = None,
+    limit: int = 40,
+) -> str:
+    """List notes in a folder (metadata + plaintext preview).
+
+    folder_path: Slash-separated path from notes_list_folders (e.g. ``Notes`` or ``Work/Clients``).
+
+    account: Optional account name; if omitted, uses the default account.
+    """
+    fp = folder_path.strip()
+    if not fp:
+        return json.dumps({"error": "folder_path must be non-empty"}, indent=2)
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be an integer"}, indent=2)
+    n = max(NOTES_LIMIT_MIN, min(lim, NOTES_LIMIT_MAX))
+    acc = (account or "").strip()
+    try:
+        raw = _run_applescript(
+            NOTES_LIST_NOTES_SCRIPT,
+            [acc, fp, str(n)],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str | float]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        r = _notes_parse_note_list_row(ln)
+        if r:
+            rows.append(r)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def notes_get_note(note_id: str) -> str:
+    """Fetch one note by **id** (from list/search). Returns plaintext, HTML body, and paths."""
+    nid = note_id.strip()
+    if not nid:
+        return json.dumps({"error": "note_id must be non-empty"}, indent=2)
+    try:
+        raw = _run_applescript(NOTES_GET_NOTE_SCRIPT, [nid], timeout=120.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    sep = chr(30)
+    parts = raw.split(sep, 7)
+    if len(parts) < 8:
+        return json.dumps({"error": "Unexpected Notes output"}, indent=2)
+    acc, fpath, uid, name, cux, mux, ptx, body = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7]
+    try:
+        cu = float(cux)
+        mu = float(mux)
+    except ValueError:
+        return json.dumps({"error": "Invalid timestamps from Notes"}, indent=2)
+    return json.dumps(
+        {
+            "account": acc,
+            "folder_path": fpath,
+            "id": uid,
+            "name": name,
+            "created_unix": cu,
+            "modified_unix": mu,
+            "created_iso": _cal_iso_z(cu),
+            "modified_iso": _cal_iso_z(mu),
+            "plaintext": ptx,
+            "body": body,
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def notes_search_notes(
+    query: str,
+    account: str | None = None,
+    limit: int = 30,
+) -> str:
+    """Search note titles and plaintext under an account (recursive folders)."""
+    q = query.strip()
+    if not q:
+        return json.dumps({"error": "query must be non-empty"}, indent=2)
+    if len(q) > NOTES_QUERY_MAX_LEN:
+        return json.dumps(
+            {"error": f"query must be at most {NOTES_QUERY_MAX_LEN} characters"},
+            indent=2,
+        )
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be an integer"}, indent=2)
+    n = max(NOTES_LIMIT_MIN, min(lim, NOTES_LIMIT_MAX))
+    acc = (account or "").strip()
+    try:
+        raw = _run_applescript(
+            NOTES_SEARCH_NOTES_SCRIPT,
+            [q, acc, str(n)],
+            timeout=180.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str | float]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        r = _notes_parse_search_row(ln)
+        if r:
+            rows.append(r)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def notes_add_note(
+    folder_path: str,
+    name: str,
+    body: str,
+    account: str | None = None,
+) -> str:
+    """Create a note (body is typically HTML that Notes.app understands)."""
+    fp = folder_path.strip()
+    if not fp:
+        return json.dumps({"error": "folder_path must be non-empty"}, indent=2)
+    nm = name if name is not None else ""
+    if "\x00" in nm or "\x00" in body:
+        return json.dumps({"error": "name/body must not contain NUL"}, indent=2)
+    acc = (account or "").strip()
+    try:
+        raw = _run_applescript(
+            NOTES_ADD_NOTE_SCRIPT,
+            [acc, fp, _b64_utf8(nm), _b64_utf8(body)],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    new_id = raw.strip()
+    if not new_id:
+        return json.dumps({"error": "Notes returned empty id"}, indent=2)
+    return json.dumps({"id": new_id}, indent=2)
+
+
+@mcp.tool()
+def notes_update_note(
+    note_id: str,
+    name: str | None = None,
+    body: str | None = None,
+) -> str:
+    """Update a note's name and/or body. Omit a field to leave it unchanged."""
+    nid = note_id.strip()
+    if not nid:
+        return json.dumps({"error": "note_id must be non-empty"}, indent=2)
+    if name is None and body is None:
+        return json.dumps({"error": "provide at least one of name or body"}, indent=2)
+    name_tok = NOTES_SKIP_FIELD if name is None else _b64_utf8(name)
+    body_tok = NOTES_SKIP_FIELD if body is None else _b64_utf8(body)
+    if name is not None and "\x00" in name:
+        return json.dumps({"error": "name must not contain NUL"}, indent=2)
+    if body is not None and "\x00" in body:
+        return json.dumps({"error": "body must not contain NUL"}, indent=2)
+    try:
+        raw = _run_applescript(
+            NOTES_UPDATE_NOTE_SCRIPT,
+            [nid, name_tok, body_tok],
+            timeout=120.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    return json.dumps({"ok": True, "id": raw.strip()}, indent=2)
+
+
+@mcp.tool()
+def notes_delete_note(note_id: str) -> str:
+    """Delete a note by id."""
+    nid = note_id.strip()
+    if not nid:
+        return json.dumps({"error": "note_id must be non-empty"}, indent=2)
+    try:
+        raw = _run_applescript(NOTES_DELETE_NOTE_SCRIPT, [nid], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if raw.strip().upper() == "OK":
+        return json.dumps({"ok": True}, indent=2)
+    return json.dumps({"ok": True, "detail": raw}, indent=2)
+
+
+@mcp.tool()
+def itunes_list_playlists() -> str:
+    """List Music.app playlists (Apple Music / library). Tool prefix itunes_* targets Music.app.
+
+    Returns name, persistent_id, and special_kind (may be empty).
+    """
+    try:
+        raw = _run_applescript(ITUNES_LIST_PLAYLISTS_SCRIPT, [], timeout=120.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Music AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        parts = ln.split("\t", 2)
+        rows.append(
+            {
+                "name": parts[0],
+                "persistent_id": parts[1] if len(parts) > 1 else "",
+                "special_kind": parts[2] if len(parts) > 2 else "",
+            }
+        )
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def itunes_search_library(
+    query: str,
+    limit: int = 25,
+    max_scan: int = 8000,
+) -> str:
+    """Search the main library from the start of the track list (name / artist / album contains).
+
+    max_scan: Cap how many library tracks to examine (100–100000) to avoid huge scans.
+    """
+    q = query.strip()
+    if not q:
+        return json.dumps({"error": "query must be non-empty"}, indent=2)
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be an integer"}, indent=2)
+    try:
+        ms = int(max_scan)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "max_scan must be an integer"}, indent=2)
+    nlim = max(ITUNES_MATCH_LIMIT_MIN, min(lim, ITUNES_MATCH_LIMIT_MAX))
+    nscan = max(ITUNES_SCAN_MAX_MIN, min(ms, ITUNES_SCAN_MAX_MAX))
+    try:
+        raw = _run_applescript(
+            ITUNES_SEARCH_LIBRARY_SCRIPT,
+            [q, str(nlim), str(nscan)],
+            timeout=180.0,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Music AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    rows: list[dict[str, str | float | int]] = []
+    for ln in raw.splitlines():
+        if not ln.strip():
+            continue
+        r = _itunes_parse_track_row(ln)
+        if r:
+            rows.append(r)
+    return json.dumps(rows, indent=2)
+
+
+@mcp.tool()
+def itunes_get_track(persistent_id: str) -> str:
+    """Look up one library track by **persistent_id** (string of digits from search/list)."""
+    pid = persistent_id.strip()
+    if not pid:
+        return json.dumps({"error": "persistent_id must be non-empty"}, indent=2)
+    try:
+        raw = _run_applescript(ITUNES_GET_TRACK_SCRIPT, [pid], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Music AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    parts = raw.split("\t", 7)
+    if len(parts) < 8:
+        return json.dumps({"error": "Unexpected Music output"}, indent=2)
+    (
+        pid_o,
+        name,
+        artist,
+        album,
+        dur_s,
+        tn_s,
+        genre,
+        loc,
+    ) = parts
+    try:
+        dur = float(dur_s)
+        tn = int(tn_s)
+    except ValueError:
+        dur, tn = 0.0, 0
+    return json.dumps(
+        {
+            "persistent_id": pid_o,
+            "name": name,
+            "artist": artist,
+            "album": album,
+            "duration_sec": dur,
+            "track_number": tn,
+            "genre": genre,
+            "location": loc,
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def itunes_now_playing() -> str:
+    """Return Music.app transport state and current track metadata (if any)."""
+    try:
+        raw = _run_applescript(ITUNES_NOW_PLAYING_SCRIPT, [], timeout=30.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Music AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    sep = chr(30)
+    parts = raw.split(sep, 7)
+    if len(parts) < 8:
+        return json.dumps({"error": "Unexpected Music output"}, indent=2)
+    ps, pid, name, artist, album, pos_s, dur_s = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+    try:
+        pos = float(pos_s) if pos_s.strip() else 0.0
+        dur = float(dur_s) if dur_s.strip() else 0.0
+    except ValueError:
+        pos, dur = 0.0, 0.0
+    return json.dumps(
+        {
+            "player_state": ps,
+            "persistent_id": pid,
+            "name": name,
+            "artist": artist,
+            "album": album,
+            "position_sec": pos,
+            "duration_sec": dur,
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def itunes_play_track(persistent_id: str | None = None) -> str:
+    """Play a library track by persistent_id, or resume/start playback when id is omitted."""
+    pid = persistent_id.strip() if persistent_id else ""
+    try:
+        raw = _run_applescript(ITUNES_PLAY_TRACK_SCRIPT, [pid], timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Music AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if raw.strip().upper() == "OK":
+        return json.dumps({"ok": True}, indent=2)
+    return json.dumps({"ok": True, "detail": raw}, indent=2)
+
+
+@mcp.tool()
+def itunes_play_pause() -> str:
+    """Toggle Music.app play / pause."""
+    try:
+        raw = _run_applescript(ITUNES_PLAY_PAUSE_SCRIPT, [], timeout=30.0)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Music AppleScript timed out"}, indent=2)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    if raw.strip().upper() == "OK":
+        return json.dumps({"ok": True}, indent=2)
+    return json.dumps({"ok": True, "detail": raw}, indent=2)
 
 
 def main() -> None:
