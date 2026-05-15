@@ -13,9 +13,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from macos_mcp.dry_run import dry_run_blocked, requires_live_app
+from macos_mcp.tool_permissions import PermissionedFastMCP, setup_tool_permissions
 
-mcp = FastMCP("macos-native-apps")
+mcp = PermissionedFastMCP("macos-native-apps")
 
 DEFAULT_MAILBOX = "INBOX"
 
@@ -673,6 +674,7 @@ def mail_get_message(
 
 
 @mcp.tool()
+@requires_live_app
 def mail_send(
     to: str,
     subject: str,
@@ -839,6 +841,7 @@ def mail_search(
 
 
 @mcp.tool()
+@requires_live_app
 def mail_move(
     mail_ids: str,
     to_mailbox: str,
@@ -884,6 +887,7 @@ def mail_move(
 
 
 @mcp.tool()
+@requires_live_app
 def mail_mark(
     mail_ids: str,
     is_read: bool,
@@ -922,6 +926,7 @@ def mail_mark(
 
 
 @mcp.tool()
+@requires_live_app
 def mail_delete(
     mail_ids: str,
     mailbox: str | None = None,
@@ -951,6 +956,7 @@ def mail_delete(
 
 
 @mcp.tool()
+@requires_live_app
 def mail_reply(
     mail_id: str,
     body: str,
@@ -1073,6 +1079,7 @@ def mail_get_attachment(
 
 
 @mcp.tool()
+@requires_live_app
 def macos_launch(
     app: str,
     delay_seconds: float = 0.5,
@@ -1301,6 +1308,7 @@ def calendar_search_events(
 
 
 @mcp.tool()
+@requires_live_app
 def calendar_add_event(
     calendar: str,
     summary: str,
@@ -1381,6 +1389,7 @@ def calendar_add_event(
 
 
 @mcp.tool()
+@requires_live_app
 def calendar_add_recurring_event(
     calendar: str,
     summary: str,
@@ -1467,6 +1476,7 @@ def calendar_add_recurring_event(
 
 
 @mcp.tool()
+@requires_live_app
 def calendar_update_event(
     uid: str,
     calendar: str | None = None,
@@ -1545,6 +1555,7 @@ def calendar_update_event(
 
 
 @mcp.tool()
+@requires_live_app
 def calendar_delete_event(
     uid: str,
     calendar: str | None = None,
@@ -1586,6 +1597,10 @@ def calendar_default_calendar(set_to: str | None = None) -> str:
     so this tool uses the on-disk preference keys Calendar maintains.
     """
     st = set_to.strip() if set_to else ""
+    if st:
+        blocked = dry_run_blocked("calendar_default_calendar")
+        if blocked is not None:
+            return blocked
     try:
         rows = _cal_fetch_calendar_rows()
     except subprocess.TimeoutExpired:
@@ -1750,6 +1765,7 @@ def reminders_get_reminder(
 
 
 @mcp.tool()
+@requires_live_app
 def reminders_add_reminder(
     list_name: str,
     title: str,
@@ -1789,6 +1805,7 @@ def reminders_add_reminder(
 
 
 @mcp.tool()
+@requires_live_app
 def reminders_set_completed(
     reminder_id: str,
     completed: bool,
@@ -1816,6 +1833,7 @@ def reminders_set_completed(
 
 
 @mcp.tool()
+@requires_live_app
 def reminders_delete_reminder(
     reminder_id: str,
     list_name: str | None = None,
@@ -2038,6 +2056,7 @@ def notes_search_notes(
 
 
 @mcp.tool()
+@requires_live_app
 def notes_add_note(
     folder_path: str,
     name: str,
@@ -2069,6 +2088,7 @@ def notes_add_note(
 
 
 @mcp.tool()
+@requires_live_app
 def notes_update_note(
     note_id: str,
     name: str | None = None,
@@ -2100,6 +2120,7 @@ def notes_update_note(
 
 
 @mcp.tool()
+@requires_live_app
 def notes_delete_note(note_id: str) -> str:
     """Delete a note by id."""
     nid = note_id.strip()
@@ -2265,6 +2286,7 @@ def itunes_now_playing() -> str:
 
 
 @mcp.tool()
+@requires_live_app
 def itunes_play_track(persistent_id: str | None = None) -> str:
     """Play a library track by persistent_id, or resume/start playback when id is omitted."""
     pid = persistent_id.strip() if persistent_id else ""
@@ -2280,6 +2302,7 @@ def itunes_play_track(persistent_id: str | None = None) -> str:
 
 
 @mcp.tool()
+@requires_live_app
 def itunes_play_pause() -> str:
     """Toggle Music.app play / pause."""
     try:
@@ -2294,6 +2317,7 @@ def itunes_play_pause() -> str:
 
 
 def main() -> None:
+    setup_tool_permissions(mcp)
     mcp.run()
 
 
