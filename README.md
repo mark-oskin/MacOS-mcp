@@ -79,7 +79,15 @@ See [Dry run](#dry-run) below.
 
 ## Connect in Claude Desktop
 
-Claude Desktop uses a JSON config file:
+### One-click install (Desktop Extension)
+
+Download `macos-native-apps.mcpb` from the [latest release](https://github.com/mark-oskin/MacOS-mcp/releases/latest) and double-click it. Claude Desktop opens an install dialog with a **Dry run** toggle; accept and the connector is live.
+
+Requires [`uv`](https://docs.astral.sh/uv/) on PATH — install with `brew install uv`. The bundle invokes `uvx` to fetch and run the server straight from GitHub; no manual venv setup.
+
+### Manual config
+
+Alternatively, edit Claude Desktop's MCP config directly:
 
 | macOS location |
 |----------------|
@@ -103,7 +111,20 @@ Add the same structure under `mcpServers`:
 
 Quit and reopen **Claude Desktop** after saving. On first use, macOS may prompt to allow **Claude** (or the host app) to control Mail, Calendar, etc.—approve for the apps you intend to automate.
 
-Claude’s MCP UI may differ slightly by version; if tools do not appear, confirm the config path and check Claude’s logs (see [Troubleshooting](#troubleshooting)).
+Claude's MCP UI may differ slightly by version; if tools do not appear, confirm the config path and check Claude's logs (see [Troubleshooting](#troubleshooting)).
+
+---
+
+## Connect in Claude Cowork
+
+Download `macos-native-apps.plugin` from the [latest release](https://github.com/mark-oskin/MacOS-mcp/releases/latest) and drag it into any Cowork conversation. Cowork shows a rich preview with an **Install** button.
+
+The plugin ships with:
+
+- the `macos-native-apps` connector (same `uvx` launch as the `.mcpb` above, requires `brew install uv`)
+- a `macos-native-apps-tips` skill that loads automatically when Claude is about to call any `mail_*` / `calendar_*` / `reminders_*` / `notes_*` / `itunes_*` / `macos_launch` tool — encodes launch-first ordering, Spotlight caveats, time-field rules, and confirm-before-mutate behavior
+
+To change the `MACOS_MCP_DRY_RUN` default or other env vars, open the connector in Cowork's settings.
 
 ---
 

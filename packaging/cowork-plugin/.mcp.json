@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "macos-native-apps": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/mark-oskin/MacOS-mcp",
+        "macos-native-mcp"
+      ],
+      "env": {
+        "MACOS_MCP_DRY_RUN": "0"
+      }
+    }
+  }
+}

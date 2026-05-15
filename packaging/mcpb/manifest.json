@@ -1,0 +1,41 @@
+{
+  "manifest_version": "0.3",
+  "name": "macos-native-apps",
+  "display_name": "macOS Native Apps",
+  "version": "0.1.0",
+  "description": "Read and act on Mac Mail, Calendar, Reminders, Notes, and Music via AppleScript.",
+  "long_description": "Wraps the [macos-native-mcp](https://github.com/mark-oskin/MacOS-mcp) server. Tools are grouped by prefix: `mail_*`, `calendar_*`, `reminders_*`, `notes_*`, `itunes_*`, and `macos_launch`. Mutating tools (send mail, create events, delete reminders) take real action — set the **Dry run** option to `1` to stub them while testing. Requires `uv` (`brew install uv`) and macOS Automation permissions for the apps you want to control.",
+  "author": {
+    "name": "Mark Oskin"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mark-oskin/MacOS-mcp"
+  },
+  "homepage": "https://github.com/mark-oskin/MacOS-mcp",
+  "keywords": ["macos", "mail", "calendar", "reminders", "notes", "music", "applescript"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/run.sh",
+    "mcp_config": {
+      "command": "${__dirname}/server/run.sh",
+      "args": [],
+      "env": {
+        "MACOS_MCP_DRY_RUN": "${user_config.dry_run}"
+      }
+    }
+  },
+  "user_config": {
+    "dry_run": {
+      "type": "string",
+      "title": "Dry run",
+      "description": "Set to '1' to stub all mutating tools (mail_send, calendar/reminders/notes create, itunes_play_*). Read-only tools still execute. Leave as '0' for normal operation.",
+      "default": "0",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin"]
+  }
+}

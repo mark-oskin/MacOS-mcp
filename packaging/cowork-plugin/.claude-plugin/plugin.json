@@ -1,0 +1,11 @@
+{
+  "name": "macos-native-apps",
+  "version": "0.1.0",
+  "description": "Connector for native macOS apps (Mail, Calendar, Reminders, Notes, Music) via AppleScript.",
+  "author": {
+    "name": "Mark Oskin"
+  },
+  "homepage": "https://github.com/mark-oskin/MacOS-mcp",
+  "repository": "https://github.com/mark-oskin/MacOS-mcp",
+  "keywords": ["macos", "mail", "calendar", "reminders", "notes", "music", "applescript", "mcp"]
+}
