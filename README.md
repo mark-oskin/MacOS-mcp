@@ -125,18 +125,20 @@ Tools are named by prefix. Typical flow: **launch app** (if needed) → **list/s
 
 | Prefix | App | Examples |
 |--------|-----|----------|
-| `mail_*` | Mail | `mail_list_accounts`, `mail_get_headers`, `mail_get_message`, `mail_search`, `mail_send`, `mail_reply`, `mail_move`, `mail_mark`, `mail_delete`, `mail_get_attachment` |
-| `calendar_*` | Calendar | `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`, `calendar_search_events`, `calendar_add_event`, `calendar_add_recurring_event`, `calendar_update_event`, `calendar_delete_event`, `calendar_default_calendar` |
-| `reminders_*` | Reminders | `reminders_list_lists`, `reminders_list_reminders`, `reminders_get_reminder`, `reminders_search_reminders`, `reminders_add_reminder`, `reminders_set_completed`, `reminders_delete_reminder` |
-| `notes_*` | Notes | `notes_list_accounts`, `notes_list_folders`, `notes_list_notes`, `notes_get_note`, `notes_search_notes`, `notes_add_note`, `notes_update_note`, `notes_delete_note` |
-| `itunes_*` | Music | `itunes_list_playlists`, `itunes_search_library`, `itunes_get_track`, `itunes_now_playing`, `itunes_play_track`, `itunes_play_pause` |
+| `mail_*` | Mail | `mail_list_accounts`, `mail_get_headers`, `mail_get_message`, `mail_search` (Spotlight), `mail_send`, … |
+| `calendar_*` | Calendar | `calendar_list_calendars`, `calendar_list_events`, `calendar_search_events` (Spotlight), `calendar_get_event`, … |
+| `reminders_*` | Reminders | `reminders_list_lists`, `reminders_list_reminders`, `reminders_get_reminder`, `reminders_add_reminder`, … |
+| `notes_*` | Notes | `notes_list_accounts`, `notes_list_folders`, `notes_list_notes`, `notes_get_note`, `notes_add_note`, … |
+| `itunes_*` | Music | `itunes_list_playlists`, `itunes_get_track`, `itunes_now_playing`, `itunes_play_track`, `itunes_play_pause` |
 | `macos_*` | Various | `macos_launch` — start and activate an allowlisted app |
 
 **Time fields:** Calendar and Reminders tools use **POSIX `start_unix` / `end_unix`** (seconds since 1970-01-01 UTC). Responses often include `*_iso` UTC timestamps for convenience.
 
 **Notes bodies:** `notes_add_note` / `notes_update_note` typically use HTML bodies Notes understands.
 
-**Music IDs:** Library tracks are referenced by **`persistent_id`** (string of digits from search/list).
+**Music IDs:** Library tracks are referenced by **`persistent_id`** (string of digits from playlists).
+
+**Search:** `mail_search` and `calendar_search_events` use **Spotlight** (`mdfind`). Notes, Reminders, and Music have no reliable Spotlight search API—use list tools instead. Grant the MCP host **Full Disk Access** if mail search returns nothing.
 
 Each tool’s docstring in `macos_mcp/server.py` describes parameters and limits.
 
@@ -209,9 +211,9 @@ Run unit tests (no live Mail):
 ## Usage tips for agents
 
 1. **Launch first:** `macos_launch` with `app: "mail"` / `"calendar"` / `"reminders"` / `"notes"` / `"music"` before other tools if you see timeouts or “not running”.
-2. **Mail:** Use `mail_get_headers` or `mail_search` for ids, then `mail_get_message`. `mail_send` sends immediately (not a draft).
-3. **Calendar:** Use `calendar_list_calendars` for names; overlap queries use `start_unix` / `end_unix`.
-4. **Reminders:** Use `reminders_list_lists`, then list/search by list name; ids look like `x-apple-reminder://…`.
+2. **Mail:** Use `mail_search` (Spotlight) or `mail_get_headers` for messages; `mail_get_message` needs Mail’s internal id (Spotlight hits may only include `spotlight_path`). `mail_send` sends immediately (not a draft).
+3. **Calendar:** Use `calendar_list_calendars` for names; `calendar_search_events` or `calendar_list_events` with `start_unix` / `end_unix`.
+4. **Reminders:** Use `reminders_list_lists`, then `reminders_list_reminders` on a list; ids look like `x-apple-reminder://…`.
 5. **Notes:** Use `notes_list_folders` for `folder_path` (e.g. `Notes` or `Work/Clients`).
 6. **Least privilege:** Turn off `mail_send` and other mutators in `tools.json` if the agent only needs read access.
 

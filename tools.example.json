@@ -23,7 +23,6 @@
     "itunes_now_playing": true,
     "itunes_play_pause": true,
     "itunes_play_track": true,
-    "itunes_search_library": true,
     "macos_launch": true,
     "mail_delete": true,
     "mail_get_attachment": true,
@@ -42,14 +41,12 @@
     "notes_list_accounts": true,
     "notes_list_folders": true,
     "notes_list_notes": true,
-    "notes_search_notes": true,
     "notes_update_note": true,
     "reminders_add_reminder": true,
     "reminders_delete_reminder": true,
     "reminders_get_reminder": true,
     "reminders_list_lists": true,
     "reminders_list_reminders": true,
-    "reminders_search_reminders": true,
     "reminders_set_completed": true
   }
 }

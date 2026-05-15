@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from macos_mcp.dry_run import dry_run_blocked, requires_live_app
+from macos_mcp.spotlight_search import search_calendar_events_spotlight, search_mail_spotlight
 from macos_mcp.tool_permissions import PermissionedFastMCP, setup_tool_permissions
 
 mcp = PermissionedFastMCP("macos-native-apps")
@@ -34,7 +35,6 @@ MAIL_GET_MESSAGE_SCRIPT = Path(__file__).with_name("mail_get_message.applescript
 MAIL_SEND_SCRIPT = Path(__file__).with_name("mail_send.applescript").read_text()
 MAIL_LIST_ACCOUNTS_SCRIPT = Path(__file__).with_name("mail_list_accounts.applescript").read_text()
 MAIL_LIST_MAILBOXES_SCRIPT = Path(__file__).with_name("mail_list_mailboxes.applescript").read_text()
-MAIL_SEARCH_SCRIPT = Path(__file__).with_name("mail_search.applescript").read_text()
 MAIL_MOVE_SCRIPT = Path(__file__).with_name("mail_move.applescript").read_text()
 MAIL_MARK_SCRIPT = Path(__file__).with_name("mail_mark.applescript").read_text()
 MAIL_DELETE_SCRIPT = Path(__file__).with_name("mail_delete.applescript").read_text()
@@ -43,7 +43,6 @@ MAIL_GET_ATTACHMENT_SCRIPT = Path(__file__).with_name("mail_get_attachment.apple
 CALENDAR_LIST_CALENDARS_SCRIPT = Path(__file__).with_name("calendar_list_calendars.applescript").read_text()
 CALENDAR_LIST_EVENTS_SCRIPT = Path(__file__).with_name("calendar_list_events.applescript").read_text()
 CALENDAR_GET_EVENT_SCRIPT = Path(__file__).with_name("calendar_get_event.applescript").read_text()
-CALENDAR_SEARCH_EVENTS_SCRIPT = Path(__file__).with_name("calendar_search_events.applescript").read_text()
 CALENDAR_ADD_EVENT_SCRIPT = Path(__file__).with_name("calendar_add_event.applescript").read_text()
 CALENDAR_ADD_RECURRING_EVENT_SCRIPT = Path(__file__).with_name("calendar_add_recurring_event.applescript").read_text()
 CALENDAR_UPDATE_EVENT_SCRIPT = Path(__file__).with_name("calendar_update_event.applescript").read_text()
@@ -55,19 +54,16 @@ REMINDERS_GET_REMINDER_SCRIPT = Path(__file__).with_name("reminders_get_reminder
 REMINDERS_ADD_REMINDER_SCRIPT = Path(__file__).with_name("reminders_add_reminder.applescript").read_text()
 REMINDERS_SET_COMPLETED_SCRIPT = Path(__file__).with_name("reminders_set_completed.applescript").read_text()
 REMINDERS_DELETE_REMINDER_SCRIPT = Path(__file__).with_name("reminders_delete_reminder.applescript").read_text()
-REMINDERS_SEARCH_REMINDERS_SCRIPT = Path(__file__).with_name("reminders_search_reminders.applescript").read_text()
 
 NOTES_LIST_ACCOUNTS_SCRIPT = Path(__file__).with_name("notes_list_accounts.applescript").read_text()
 NOTES_LIST_FOLDERS_SCRIPT = Path(__file__).with_name("notes_list_folders.applescript").read_text()
 NOTES_LIST_NOTES_SCRIPT = Path(__file__).with_name("notes_list_notes.applescript").read_text()
 NOTES_GET_NOTE_SCRIPT = Path(__file__).with_name("notes_get_note.applescript").read_text()
-NOTES_SEARCH_NOTES_SCRIPT = Path(__file__).with_name("notes_search_notes.applescript").read_text()
 NOTES_ADD_NOTE_SCRIPT = Path(__file__).with_name("notes_add_note.applescript").read_text()
 NOTES_UPDATE_NOTE_SCRIPT = Path(__file__).with_name("notes_update_note.applescript").read_text()
 NOTES_DELETE_NOTE_SCRIPT = Path(__file__).with_name("notes_delete_note.applescript").read_text()
 
 ITUNES_LIST_PLAYLISTS_SCRIPT = Path(__file__).with_name("itunes_list_playlists.applescript").read_text()
-ITUNES_SEARCH_LIBRARY_SCRIPT = Path(__file__).with_name("itunes_search_library.applescript").read_text()
 ITUNES_GET_TRACK_SCRIPT = Path(__file__).with_name("itunes_get_track.applescript").read_text()
 ITUNES_NOW_PLAYING_SCRIPT = Path(__file__).with_name("itunes_now_playing.applescript").read_text()
 ITUNES_PLAY_TRACK_SCRIPT = Path(__file__).with_name("itunes_play_track.applescript").read_text()
@@ -77,9 +73,6 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 
 SEARCH_LIMIT_MIN = 1
 SEARCH_LIMIT_MAX = 50
-SEARCH_SCAN_MIN = 1
-SEARCH_SCAN_MAX = 2000
-
 CAL_EVENTS_LIMIT_MIN = 1
 CAL_EVENTS_LIMIT_MAX = 200
 CAL_SEARCH_QUERY_MAX_LEN = 500
@@ -89,17 +82,9 @@ CAL_RRULE_MAX_LEN = 4000
 
 REMINDER_LIMIT_MIN = 1
 REMINDER_LIMIT_MAX = 200
-REMINDER_QUERY_MAX_LEN = 500
-
 NOTES_LIMIT_MIN = 1
 NOTES_LIMIT_MAX = 200
-NOTES_QUERY_MAX_LEN = 500
 NOTES_SKIP_FIELD = "__SKIP__"
-
-ITUNES_MATCH_LIMIT_MIN = 1
-ITUNES_MATCH_LIMIT_MAX = 100
-ITUNES_SCAN_MAX_MIN = 100
-ITUNES_SCAN_MAX_MAX = 100_000
 
 ATTACHMENT_MAX_FILES = 15
 ATTACHMENT_MAX_BYTES_PER_FILE = 5 * 1024 * 1024
@@ -335,24 +320,6 @@ def _notes_parse_note_list_row(ln: str) -> dict[str, str | float] | None:
         "modified_unix": mu,
         "preview": prv,
         "created_iso": _cal_iso_z(cu),
-        "modified_iso": _cal_iso_z(mu),
-    }
-
-
-def _notes_parse_search_row(ln: str) -> dict[str, str | float] | None:
-    parts = ln.split("\t", 3)
-    if len(parts) < 4:
-        return None
-    nid, name, mux, prv = parts
-    try:
-        mu = float(mux)
-    except ValueError:
-        return None
-    return {
-        "id": nid,
-        "name": name,
-        "modified_unix": mu,
-        "preview": prv,
         "modified_iso": _cal_iso_z(mu),
     }
 
@@ -790,54 +757,37 @@ def mail_search(
     mailbox: str | None = None,
     account: str | None = None,
     limit: int = 20,
-    max_scan: int = 500,
-    recipient_preview_chars: int = 220,
 ) -> str:
-    """Search recent messages in a mailbox for a substring in subject or sender (metadata only).
+    """Search Mail via **Spotlight** (indexed message content and headers).
 
-    Scans from newest (message 1) up to max_scan messages. Case-insensitive match.
+    Uses ``mdfind kind:mail`` — fast compared to scanning the mailbox in AppleScript.
+    Results include subject, sender, date, and recipients from metadata. The Mail
+    internal ``id`` field is often empty; use ``spotlight_path`` or narrow with
+    ``mail_get_headers`` if you need Mail's id for ``mail_get_message``.
 
-    query: Substring to find in subject or sender (required).
+    mailbox / account: Optional loose filters on the message file path (not exact).
 
-    mailbox: Defaults to INBOX if omitted or empty.
+    limit: Max results (1–50).
 
-    limit: Max matching messages to return (1–50).
-
-    max_scan: Max messages to scan from the top (1–2000).
-
-    recipient_preview_chars: Same as mail_get_headers (20–2000).
+    Requires Terminal/Cursor to have **Full Disk Access** for Mail indexing if no results.
     """
     q = query.strip()
     if not q:
         return json.dumps({"error": "query must be non-empty"}, indent=2)
-    mb = _resolve_mailbox(mailbox)
     try:
         lim = int(limit)
     except (TypeError, ValueError):
         return json.dumps({"error": "limit must be an integer"}, indent=2)
     n = max(SEARCH_LIMIT_MIN, min(lim, SEARCH_LIMIT_MAX))
+    mb = _resolve_mailbox(mailbox) if mailbox else None
+    acc = _normalize_account(account)
     try:
-        scan = int(max_scan)
-    except (TypeError, ValueError):
-        return json.dumps({"error": "max_scan must be an integer"}, indent=2)
-    scan_n = max(SEARCH_SCAN_MIN, min(scan, SEARCH_SCAN_MAX))
-    try:
-        rpc = int(recipient_preview_chars)
-    except (TypeError, ValueError):
-        return json.dumps({"error": "recipient_preview_chars must be an integer"}, indent=2)
-    preview_n = max(RECIPIENT_PREVIEW_MIN, min(rpc, RECIPIENT_PREVIEW_MAX))
-    acc = _normalize_account(account) or ""
-    try:
-        raw = _run_applescript(
-            MAIL_SEARCH_SCRIPT,
-            [mb, acc, q, str(n), str(scan_n), str(preview_n)],
-            timeout=120.0,
-        )
+        rows = search_mail_spotlight(q, limit=n, mailbox=mb, account=acc)
     except subprocess.TimeoutExpired:
-        return json.dumps({"error": "Mail AppleScript timed out"}, indent=2)
+        return json.dumps({"error": "Spotlight mail search timed out"}, indent=2)
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, indent=2)
-    return json.dumps(_parse_header_tsv(raw), indent=2)
+    return json.dumps(rows, indent=2)
 
 
 @mcp.tool()
@@ -1260,15 +1210,17 @@ def calendar_search_events(
     calendar: str | None = None,
     limit: int = 30,
 ) -> str:
-    """Case-insensitive substring search in summary, description, and location for events overlapping the range.
+    """Search Calendar events via **Spotlight** (``kind:event``) in a date range.
+
+    Matches title, text content, description, and location fields in the index.
+    Overlap semantics match ``calendar_list_events`` (start < end_unix, end > start_unix).
 
     query: Non-empty substring (max 500 characters).
 
-    start_unix / end_unix: Same overlap semantics as calendar_list_events.
+    calendar: Optional hint to filter results (path/title/location substring match).
 
-    calendar: Optional calendar name (exact). Empty scans all calendars.
-
-    limit: 1–200 matches (cap). Uses Foundation for lowercasing on the AppleScript side.
+    limit: 1–200. ``uid`` may be empty; use ``calendar_get_event`` when you have a uid
+    from ``calendar_list_events``.
     """
     q = query.strip()
     if not q:
@@ -1286,24 +1238,19 @@ def calendar_search_events(
     except (TypeError, ValueError):
         return json.dumps({"error": "limit must be an integer"}, indent=2)
     n = max(CAL_EVENTS_LIMIT_MIN, min(lim, CAL_EVENTS_LIMIT_MAX))
-    cal = (calendar or "").strip()
+    cal = (calendar or "").strip() or None
     try:
-        raw = _run_applescript(
-            CALENDAR_SEARCH_EVENTS_SCRIPT,
-            [q, cal, str(float(start_unix)), str(float(end_unix)), str(n)],
-            timeout=180.0,
+        rows = search_calendar_events_spotlight(
+            q,
+            start_unix=float(start_unix),
+            end_unix=float(end_unix),
+            limit=n,
+            calendar_name=cal,
         )
     except subprocess.TimeoutExpired:
-        return json.dumps({"error": "Calendar AppleScript timed out"}, indent=2)
+        return json.dumps({"error": "Spotlight calendar search timed out"}, indent=2)
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, indent=2)
-    rows: list[dict[str, str | float | bool]] = []
-    for ln in raw.splitlines():
-        if not ln.strip():
-            continue
-        row = _cal_parse_event_tsv_row(ln)
-        if row:
-            rows.append(row)
     return json.dumps(rows, indent=2)
 
 
@@ -1855,49 +1802,6 @@ def reminders_delete_reminder(
 
 
 @mcp.tool()
-def reminders_search_reminders(
-    query: str,
-    list_name: str | None = None,
-    include_completed: bool = False,
-    limit: int = 30,
-) -> str:
-    """Case-insensitive substring search in reminder title and body."""
-    q = query.strip()
-    if not q:
-        return json.dumps({"error": "query must be non-empty"}, indent=2)
-    if len(q) > REMINDER_QUERY_MAX_LEN:
-        return json.dumps(
-            {"error": f"query must be at most {REMINDER_QUERY_MAX_LEN} characters"},
-            indent=2,
-        )
-    try:
-        lim = int(limit)
-    except (TypeError, ValueError):
-        return json.dumps({"error": "limit must be an integer"}, indent=2)
-    n = max(REMINDER_LIMIT_MIN, min(lim, REMINDER_LIMIT_MAX))
-    inc = "1" if include_completed else "0"
-    lst = (list_name or "").strip()
-    try:
-        raw = _run_applescript(
-            REMINDERS_SEARCH_REMINDERS_SCRIPT,
-            [q, lst, inc, str(n)],
-            timeout=120.0,
-        )
-    except subprocess.TimeoutExpired:
-        return json.dumps({"error": "Reminders AppleScript timed out"}, indent=2)
-    except RuntimeError as e:
-        return json.dumps({"error": str(e)}, indent=2)
-    rows: list[dict[str, str | float | bool | None]] = []
-    for row_ln in raw.splitlines():
-        if not row_ln.strip():
-            continue
-        r = _rem_parse_reminder_row(row_ln)
-        if r:
-            rows.append(r)
-    return json.dumps(rows, indent=2)
-
-
-@mcp.tool()
 def notes_list_accounts() -> str:
     """List Notes.app account names (iCloud, On My Mac, …)."""
     try:
@@ -1977,7 +1881,7 @@ def notes_list_notes(
 
 @mcp.tool()
 def notes_get_note(note_id: str) -> str:
-    """Fetch one note by **id** (from list/search). Returns plaintext, HTML body, and paths."""
+    """Fetch one note by **id** (from list). Returns plaintext, HTML body, and paths."""
     nid = note_id.strip()
     if not nid:
         return json.dumps({"error": "note_id must be non-empty"}, indent=2)
@@ -2012,47 +1916,6 @@ def notes_get_note(note_id: str) -> str:
         },
         indent=2,
     )
-
-
-@mcp.tool()
-def notes_search_notes(
-    query: str,
-    account: str | None = None,
-    limit: int = 30,
-) -> str:
-    """Search note titles and plaintext under an account (recursive folders)."""
-    q = query.strip()
-    if not q:
-        return json.dumps({"error": "query must be non-empty"}, indent=2)
-    if len(q) > NOTES_QUERY_MAX_LEN:
-        return json.dumps(
-            {"error": f"query must be at most {NOTES_QUERY_MAX_LEN} characters"},
-            indent=2,
-        )
-    try:
-        lim = int(limit)
-    except (TypeError, ValueError):
-        return json.dumps({"error": "limit must be an integer"}, indent=2)
-    n = max(NOTES_LIMIT_MIN, min(lim, NOTES_LIMIT_MAX))
-    acc = (account or "").strip()
-    try:
-        raw = _run_applescript(
-            NOTES_SEARCH_NOTES_SCRIPT,
-            [q, acc, str(n)],
-            timeout=180.0,
-        )
-    except subprocess.TimeoutExpired:
-        return json.dumps({"error": "Notes AppleScript timed out"}, indent=2)
-    except RuntimeError as e:
-        return json.dumps({"error": str(e)}, indent=2)
-    rows: list[dict[str, str | float]] = []
-    for ln in raw.splitlines():
-        if not ln.strip():
-            continue
-        r = _notes_parse_search_row(ln)
-        if r:
-            rows.append(r)
-    return json.dumps(rows, indent=2)
 
 
 @mcp.tool()
@@ -2165,51 +2028,8 @@ def itunes_list_playlists() -> str:
 
 
 @mcp.tool()
-def itunes_search_library(
-    query: str,
-    limit: int = 25,
-    max_scan: int = 8000,
-) -> str:
-    """Search the main library from the start of the track list (name / artist / album contains).
-
-    max_scan: Cap how many library tracks to examine (100–100000) to avoid huge scans.
-    """
-    q = query.strip()
-    if not q:
-        return json.dumps({"error": "query must be non-empty"}, indent=2)
-    try:
-        lim = int(limit)
-    except (TypeError, ValueError):
-        return json.dumps({"error": "limit must be an integer"}, indent=2)
-    try:
-        ms = int(max_scan)
-    except (TypeError, ValueError):
-        return json.dumps({"error": "max_scan must be an integer"}, indent=2)
-    nlim = max(ITUNES_MATCH_LIMIT_MIN, min(lim, ITUNES_MATCH_LIMIT_MAX))
-    nscan = max(ITUNES_SCAN_MAX_MIN, min(ms, ITUNES_SCAN_MAX_MAX))
-    try:
-        raw = _run_applescript(
-            ITUNES_SEARCH_LIBRARY_SCRIPT,
-            [q, str(nlim), str(nscan)],
-            timeout=180.0,
-        )
-    except subprocess.TimeoutExpired:
-        return json.dumps({"error": "Music AppleScript timed out"}, indent=2)
-    except RuntimeError as e:
-        return json.dumps({"error": str(e)}, indent=2)
-    rows: list[dict[str, str | float | int]] = []
-    for ln in raw.splitlines():
-        if not ln.strip():
-            continue
-        r = _itunes_parse_track_row(ln)
-        if r:
-            rows.append(r)
-    return json.dumps(rows, indent=2)
-
-
-@mcp.tool()
 def itunes_get_track(persistent_id: str) -> str:
-    """Look up one library track by **persistent_id** (string of digits from search/list)."""
+    """Look up one library track by **persistent_id** (string of digits from playlists)."""
     pid = persistent_id.strip()
     if not pid:
         return json.dumps({"error": "persistent_id must be non-empty"}, indent=2)
